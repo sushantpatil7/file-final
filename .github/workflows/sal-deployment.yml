@@ -1,58 +1,55 @@
-name: SAL SQL Deployment Validation
+name: SAL SQL Deployment
 
 on:
   pull_request:
     paths:
-      - "sal/deployment/**/*.sql"
+      - 'sal/deployment/**/*.sql'
 
 jobs:
-  validate-sql:
+  validate-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      # 1️⃣ Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2️⃣ Get changed SQL files in this PR
       - name: Get changed SQL files
-        id: changed-files
+        id: get_sql_files
         run: |
-          git fetch origin ${{ github.base_ref }}
-          files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^sal/deployment/.*\.sql$' || true)
-          echo "files<<EOF" >> $GITHUB_OUTPUT
-          echo "$files" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          files=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep 'sal/deployment/.*\.sql' || true)
+          echo "Changed SQL files: $files"
+          echo "::set-output name=sql_files::$files"
 
-      - name: Validate SQL files
+      # 3️⃣ Extract unique SCT numbers
+      - name: Extract SCT numbers
+        id: sct_numbers
         run: |
-          set -e
-          for file in ${{ steps.changed-files.outputs.files }}; do
-            echo "Validating $file"
+          files="${{ steps.get_sql_files.outputs.sql_files }}"
+          scts=$(echo "$files" | awk -F'/' '{print $3}' | sort | uniq)
+          echo "SCTs: $scts"
+          echo "::set-output name=scts::$scts"
 
-            # Path validation
-            if [[ ! "$file" =~ ^sal/deployment/SCT-[0-9]+/.+\.sql$ ]]; then
-              echo "❌ Invalid path: $file"
-              exit 1
-            fi
+      # 4️⃣ Trigger Lambda for all changed SCTs
+      - name: Trigger Lambda for changed SQLs
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          files="${{ steps.get_sql_files.outputs.sql_files }}"
+          scts="${{ steps.sct_numbers.outputs.scts }}"
 
-            filename=$(basename "$file")
-
-            # Filename date + version validation
-            if [[ ! "$filename" =~ ^.+_[0-9]{4}_[0-9]{2}_[0-9]{2}_v[0-9]+\.sql$ ]]; then
-              echo "❌ Invalid filename format: $filename"
-              exit 1
-            fi
-
-            # Extract date
-            date_part=$(echo "$filename" | grep -oE '[0-9]{4}_[0-9]{2}_[0-9]{2}')
-            year=${date_part:0:4}
-            month=${date_part:5:2}
-            day=${date_part:8:2}
-
-            # Validate date
-            if ! date -d "$year-$month-$day" >/dev/null 2>&1; then
-              echo "❌ Invalid date in filename: $filename"
-              exit 1
-            fi
-
-            echo "✅ $file passed validation"
+          for sct in $scts; do
+            changed_files=$(echo "$files" | grep "$sct")
+            payload=$(jq -n --arg did "$sct" --argjson cf "[$(echo "$changed_files" | jq -R . | jq -s .)]" \
+              '{deployment_id: $did, pr_number: '${{ github.event.pull_request.number }}', changed_sql_files: $cf}')
+            
+            echo "Invoking Lambda for SCT: $sct with payload: $payload"
+            aws lambda invoke \
+              --region $AWS_REGION \
+              --function-name sal-sql-deployment \
+              --payload "$payload" \
+              response_$sct.json
           done
