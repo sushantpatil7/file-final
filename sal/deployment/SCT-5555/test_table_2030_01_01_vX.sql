@@ -1,0 +1,3 @@
+CREATE TABLE IF NOT EXISTS future_table (
+    id INT PRIMARY KEY
+);
