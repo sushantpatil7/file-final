@@ -1,4 +1,4 @@
 CREATE TABLE IF NOT EXISTS test_table (
     id INT PRIMARY KEY,
-    name VARCHAR(50)
+    name VARCHAR(100)
 );
