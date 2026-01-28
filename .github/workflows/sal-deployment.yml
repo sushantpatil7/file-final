@@ -10,18 +10,46 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ Checkout code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Trigger Phase 6 Lambda
+      # 2️⃣ Get changed SQL files in this PR
+      - name: Get changed SQL files
+        id: get_sql_files
         run: |
-          aws lambda invoke \
-            --function-name sal-sql-deployment \
-            --payload '{
-              "deployment_id": "SCT-5555",
-              "pr_number": 6,
-              "changed_sql_files": [
-                "sal/deployment/SCT-5555/test_table_2026_01_31_v1.sql",
-                "sal/deployment/SCT-5555/test_table_2030_01_01_vX.sql"
-              ]
-            }' response.json
+          files=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep 'sal/deployment/.*\.sql' || true)
+          echo "Changed SQL files: $files"
+          echo "::set-output name=sql_files::$files"
+
+      # 3️⃣ Extract unique SCT numbers
+      - name: Extract SCT numbers
+        id: sct_numbers
+        run: |
+          files="${{ steps.get_sql_files.outputs.sql_files }}"
+          scts=$(echo "$files" | awk -F'/' '{print $3}' | sort | uniq)
+          echo "SCTs: $scts"
+          echo "::set-output name=scts::$scts"
+
+      # 4️⃣ Trigger Lambda for all changed SCTs
+      - name: Trigger Lambda for changed SQLs
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          files="${{ steps.get_sql_files.outputs.sql_files }}"
+          scts="${{ steps.sct_numbers.outputs.scts }}"
+
+          for sct in $scts; do
+            changed_files=$(echo "$files" | grep "$sct")
+            payload=$(jq -n --arg did "$sct" --argjson cf "[$(echo "$changed_files" | jq -R . | jq -s .)]" \
+              '{deployment_id: $did, pr_number: '${{ github.event.pull_request.number }}', changed_sql_files: $cf}')
+            
+            echo "Invoking Lambda for SCT: $sct with payload: $payload"
+            aws lambda invoke \
+              --region $AWS_REGION \
+              --function-name sal-sql-deployment \
+              --payload "$payload" \
+              response_$sct.json
+          done
