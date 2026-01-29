@@ -1,0 +1,1 @@
+CREATE TABLE sct_8888_test ( id INT PRIMARY KEY, name VARCHAR(100), created_at TIMESTAMP ); 
