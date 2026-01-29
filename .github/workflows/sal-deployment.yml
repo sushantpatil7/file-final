@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout code
+      # 1️⃣ Checkout repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -49,7 +49,7 @@ jobs:
             echo "Invoking Lambda for SCT: $sct with payload: $payload"
             aws lambda invoke \
               --region $AWS_REGION \
-              --function-name sal-sql-deployment \
+              --function-name sal-sql-deployment-lambda \
               --payload "$payload" \
               response_$sct.json
           done
