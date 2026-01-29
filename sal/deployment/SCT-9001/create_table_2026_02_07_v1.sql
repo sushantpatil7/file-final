@@ -1,0 +1,1 @@
+CREATE TABLE test_9001 (id INT); 
