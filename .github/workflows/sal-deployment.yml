@@ -10,72 +10,71 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout repository
+      # 1️⃣ Checkout repo with full history
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # REQUIRED for PR diff
 
-      # 2️⃣ Install jq (required for JSON payload)
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
+      # 2️⃣ Install system dependencies
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq unzip curl
 
-      # 3️⃣ Get changed SQL files in this PR (PR-safe diff)
+      # 3️⃣ Install AWS CLI v2 (if not already installed)
+      - name: Install AWS CLI v2
+        run: |
+          if ! command -v aws &> /dev/null; then
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+          fi
+          aws --version
+
+      # 4️⃣ Get changed SQL files (PR-safe)
       - name: Get changed SQL files
         id: get_sql_files
         run: |
-          echo "Base SHA: ${{ github.event.pull_request.base.sha }}"
-          echo "Head SHA: ${{ github.event.pull_request.head.sha }}"
-
-          files=$(git diff --name-only \
-            ${{ github.event.pull_request.base.sha }} \
-            ${{ github.event.pull_request.head.sha }} \
-            | grep '^sal/deployment/.*\.sql$' || true)
-
+          files=$(git diff --name-only origin/${{ github.base_ref }}...${{ github.head_ref }} | grep '^sal/deployment/.*\.sql' || true)
           echo "Changed SQL files:"
           echo "$files"
-
           echo "sql_files<<EOF" >> $GITHUB_OUTPUT
           echo "$files" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # 4️⃣ Invoke Lambda for each SCT
-      - name: Invoke SQL Deployment Lambda
+      # 5️⃣ Fail if no SQL files found
+      - name: Fail if no SQL files
+        if: steps.get_sql_files.outputs.sql_files == ''
+        run: |
+          echo "❌ No SQL files detected in PR"
+          exit 1
+
+      # 6️⃣ Invoke Lambda per SCT
+      - name: Invoke Lambda per SCT
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: eu-north-1
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           files="${{ steps.get_sql_files.outputs.sql_files }}"
 
-          if [ -z "$files" ]; then
-            echo "❌ No SQL files detected. Exiting."
-            exit 0
-          fi
-
-          echo "✅ SQL files detected:"
-          echo "$files"
-
-          scts=$(echo "$files" | awk -F'/' '{print $3}' | sort | uniq)
-
-          for sct in $scts; do
-            echo "🔹 Processing SCT: $sct"
-
-            changed_files=$(echo "$files" | grep "$sct" | jq -R . | jq -s .)
+          for sct in $(echo "$files" | awk -F'/' '{print $3}' | sort | uniq); do
+            sct_files=$(echo "$files" | grep "$sct" | jq -R . | jq -s .)
 
             payload=$(jq -n \
-              --arg did "$sct" \
-              --arg pr "${{ github.event.pull_request.number }}" \
-              --argjson cf "$changed_files" \
-              '{deployment_id:$did, pr_number:$pr, changed_sql_files:$cf}')
+              --arg deployment_id "$sct" \
+              --arg pr_number "${{ github.event.pull_request.number }}" \
+              --argjson changed_sql_files "$sct_files" \
+              '{deployment_id:$deployment_id, pr_number:$pr_number, changed_sql_files:$changed_sql_files}')
 
-            echo "🚀 Invoking Lambda with payload:"
+            echo "🚀 Invoking Lambda for $sct"
             echo "$payload"
 
             aws lambda invoke \
               --function-name sal-sql-deployment-lambda \
-              --region eu-north-1 \
               --payload "$payload" \
               response_$sct.json
 
-            echo "📥 Lambda response:"
             cat response_$sct.json
           done
