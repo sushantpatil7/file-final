@@ -10,24 +10,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ Checkout repo with full history
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0   # REQUIRED for PR diff
 
+      # 2️⃣ Install system dependencies
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y jq unzip curl
 
+      # 3️⃣ Install AWS CLI v2 (if not already installed)
       - name: Install AWS CLI v2
         run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install
+          if ! command -v aws &> /dev/null; then
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+          fi
           aws --version
 
-      - name: Get changed SQL files (PR-safe)
+      # 4️⃣ Get changed SQL files (PR-safe)
+      - name: Get changed SQL files
         id: get_sql_files
         run: |
           files=$(git diff --name-only origin/${{ github.base_ref }}...${{ github.head_ref }} | grep '^sal/deployment/.*\.sql' || true)
@@ -37,12 +43,14 @@ jobs:
           echo "$files" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Fail if no SQL files found
+      # 5️⃣ Fail if no SQL files found
+      - name: Fail if no SQL files
         if: steps.get_sql_files.outputs.sql_files == ''
         run: |
           echo "❌ No SQL files detected in PR"
           exit 1
 
+      # 6️⃣ Invoke Lambda per SCT
       - name: Invoke Lambda per SCT
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
